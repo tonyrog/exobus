@@ -1,0 +1,15 @@
+{application, exobus,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+		  exo,
+		  lager,
+		  ebus
+                 ]},
+  {mod, { exobus_app, []}},
+  {env, []}
+ ]}.
