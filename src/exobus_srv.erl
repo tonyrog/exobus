@@ -161,38 +161,32 @@ control(_Socket, _Request, _From, State) ->
     lager:debug("exobus request ~p", [_Request]),
     {noreply, State}.
 
+info(_Socket, Info={xbus,_TopicPattern,_Topic,_Value}, State) 
+  when State#state.state =:= open ->
+    State1 = send(State, Info),
+    {ok,State1};
 info(_Socket, Info, State) ->
     lager:debug("exobus info ~p", [Info]),
-    State1 = if State#state.state =:= open ->
-		     case Info of
-			 {Topic,Value} ->
-			     send(State, {cast,{Topic,Value}});
-			 _ ->
-			     send(State, {info, Info})
-		     end;
-		true ->
-		     State
-	     end,
-    {ok, State1}.
+    {ok, State}.
 
 handle_call(ID,Request,State) ->
     case Request of
-	{subscribe,TopicList} when is_list(TopicList) ->
+	{sub,TopicList} when is_list(TopicList) ->
 	    SubList = State#state.sublist,
 	    {Reply,SubList1} = do_subscribe(TopicList,SubList),
 	    State1 = send(State, {reply,ID, Reply}),
 	    %% must add it again, instead of reference count
 	    {ok, State1#state { sublist = SubList1 }};
 
-	{unsubscribe,TopicList} when is_list(TopicList) ->
+	{unsub,TopicList} when is_list(TopicList) ->
 	    SubList = State#state.sublist,
 	    {Reply,SubList1} = do_unsubscribe(TopicList,SubList),
 	    State1 = send(State, {reply,ID, Reply}),
 	    %% must add it again, instead of reference count
 	    {ok, State1#state { sublist = SubList1 }};
 
-	{publish,Topic,Message} ->
-	    Reply = ebus:pub(Topic, Message),
+	{pub,Topic,Value} ->
+	    Reply = xbus:pub(Topic,Value),
 	    State1 = send(State,{reply,ID,Reply}),
 	    {ok,State1};
 	_ ->
@@ -209,8 +203,8 @@ do_subscribe([Topic|Ts],SubList,Reply) ->
 	true ->
 	    do_subscribe(Ts,[Topic|SubList],Reply);
 	false ->
-	    case ebus:sub(self(),Topic) of
-		ok ->
+	    case xbus:sub(Topic) of
+		true ->
 		    do_subscribe(Ts,[Topic|SubList],Reply);
 		Reply1 ->
 		    do_subscribe(Ts,[Topic|SubList],Reply1)
@@ -228,8 +222,8 @@ do_unsubscribe([Topic|Ts], SubList, Reply) ->
 	true ->
 	    do_unsubscribe(Ts, SubList1, Reply);
 	false ->
-	    case ebus:unsub(self(), Topic) of
-		ok ->
+	    case xbus:unsub(Topic) of
+		true ->
 		    do_unsubscribe(Ts, SubList1, Reply);
 		Reply1 ->
 		    do_unsubscribe(Ts, SubList1, Reply1)

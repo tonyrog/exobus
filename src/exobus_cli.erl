@@ -16,9 +16,9 @@
 
 %% API
 -export([start_link/1]).
--export([subscribe/2]).
--export([unsubscribe/2]).
--export([publish/3]).
+-export([sub/2]).
+-export([unsub/2]).
+-export([pub/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -63,14 +63,14 @@
 %%% API
 %%%===================================================================
 
-subscribe(Pid,Topic) ->
-    gen_server:call(Pid, {subscribe,Topic}).
+sub(Pid,TopicPattern) ->
+    gen_server:call(Pid, {sub,TopicPattern}).
 
-unsubscribe(Pid,Topic) ->
-    gen_server:call(Pid, {unsubscribe,Topic}).
+unsub(Pid,TopicPattern) ->
+    gen_server:call(Pid, {unsub,TopicPattern}).
 
-publish(Pid,Topic,Value) ->
-    gen_server:call(Pid, {publish,Topic,Value}).
+pub(Pid,Topic,Value) ->
+    gen_server:call(Pid, {pub,Topic,Value}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -142,11 +142,11 @@ init(Opts) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({subscribe,Topic}, From, State) ->
-    remote_call({subscribe,[Topic]}, From, State);
-handle_call({unsubscribe,Topic}, From, State) ->
-    remote_call({unsubscribe,[Topic]}, From, State);
-handle_call(Request={publish,_Topic,_Value}, From, State) ->
+handle_call({sub,Topic}, From, State) ->
+    remote_call({sub,[Topic]}, From, State);
+handle_call({unsub,Topic}, From, State) ->
+    remote_call({unsub,[Topic]}, From, State);
+handle_call(Request={pub,_Topic,_Value}, From, State) ->
     remote_call(Request, From, State);
 handle_call(_Request, _From, State) ->
     {reply, {error,bad_call}, State}.
@@ -194,6 +194,9 @@ handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
 	    case verify(State,Hash,Count,Bin) of
 		{ok,State1} ->
 		    case Mesg of
+			{xbus,_TopicPattern,Topic,Value} ->
+			    xbus:pub(Topic,Value),
+			    {noreply, State1};
 			{reply,ID,Reply} ->
 			    case lists:keytake(ID,2,State1#state.wait_recv) of
 				false ->
@@ -202,9 +205,6 @@ handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
 				    gen_server:reply(From, Reply),
 				    {noreply,State1#state { wait_recv = Wr}}
 			    end;
-			{cast,{Topic,Value}} ->
-			    ebus:pub(Topic,{Topic,Value}),
-			    {noreply, State1};
 			ping_res ->
 			    {noreply,State1#state { ping_response = true }};
 			Term ->
@@ -409,9 +409,11 @@ connect(State) ->
 	    Ws0   = State#state.wait_send,
 	    Ws = if State#state.topic_list =:= [] -> Ws0;
 		    true ->
+			 TL = lists:append([[T,<<"{META}.",T/binary>>] || 
+					       T <- State#state.topic_list]),
 			 CRef = make_ref(),
 			 From = {self(),CRef},
-			 Call = {call,CRef,{subscribe,State#state.topic_list}},
+			 Call = {call,CRef,{sub,TL}},
 			 Ws0++[{From,CRef,Call}]
 		 end,
 	    State1 = State#state { socket=Socket, 

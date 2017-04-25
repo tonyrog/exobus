@@ -24,13 +24,18 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-    Cs = case application:get_env(exobus, mode) of
-	     {ok,client} ->
-		 {ok,Servers} = application:get_env(exobus, servers),
-		 [?CHILD(Name,exobus_cli, worker, [{name,Name}]) || 
-		     {Name,_Opts} <- Servers];
-	     {ok,server} ->
-		 {ok,ID} = application:get_env(exobus, id),
-		 [?CHILD(ID,exobus_srv, worker, [])]
-	 end,
-    {ok, { {one_for_one, 5, 10}, Cs} }.
+    Cs1 = case application:get_env(exobus, clients) of
+	      undefined -> [];
+	      {ok,[]} -> [];
+	      {ok,_Clients} ->
+		  {ok,ID} = application:get_env(exobus, id),
+		  [?CHILD(ID,exobus_srv, worker, [])]
+	  end,
+    Cs2 = case application:get_env(exobus, servers) of
+	      undefined -> [];
+	      {ok,[]} -> [];
+	      {ok,Servers} ->
+		  [?CHILD(Name,exobus_cli, worker, [{name,Name}]) || 
+		      {Name,_Opts} <- Servers]
+	  end,
+    {ok, { {one_for_one, 5, 10}, Cs1++Cs2} }.

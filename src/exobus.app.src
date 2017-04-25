@@ -1,14 +1,14 @@
 {application, exobus,
  [
   {description, ""},
-  {vsn, "1"},
+  {vsn, git},
   {registered, []},
   {applications, [
                   kernel,
                   stdlib,
 		  exo,
 		  lager,
-		  ebus
+		  xbus
                  ]},
   {mod, { exobus_app, []}},
   {env, []}
