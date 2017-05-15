@@ -19,6 +19,7 @@
 -export([sub/2]).
 -export([unsub/2]).
 -export([pub/3]).
+-export([pub/4]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -71,6 +72,9 @@ unsub(Pid,TopicPattern) ->
 
 pub(Pid,Topic,Value) ->
     gen_server:call(Pid, {pub,Topic,Value}).
+
+pub(Pid,Topic,Value,TimeStamp) ->
+    gen_server:call(Pid, {pub,Topic,Value,TimeStamp}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -148,6 +152,8 @@ handle_call({unsub,Topic}, From, State) ->
     remote_call({unsub,[Topic]}, From, State);
 handle_call(Request={pub,_Topic,_Value}, From, State) ->
     remote_call(Request, From, State);
+handle_call(Request={pub,_Topic,_Value,_TimeStamp}, From, State) ->
+    remote_call(Request, From, State);
 handle_call(_Request, _From, State) ->
     {reply, {error,bad_call}, State}.
 
@@ -194,8 +200,10 @@ handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
 	    case verify(State,Hash,Count,Bin) of
 		{ok,State1} ->
 		    case Mesg of
-			{xbus,_TopicPattern,Topic,Value} ->
-			    xbus:pub(Topic,Value),
+			{xbus,_TopicPattern,#{ topic:=Topic,
+					       value:=Value,
+					       timestamp:=TimeStamp }} ->
+			    xbus:pub(Topic,Value,TimeStamp),
 			    {noreply, State1};
 			{reply,ID,Reply} ->
 			    case lists:keytake(ID,2,State1#state.wait_recv) of
@@ -302,7 +310,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-handle_auth_res(_Mesg={auth_res,[{id,ServerName},{chal,Chal},{cred,Cred}]},
+handle_auth_res(_Mesg={auth_res,#{id:=ServerName,chal:=Chal,cred:=Cred}},
 		State) ->
     lager:debug("auth_res: ~p ok", [_Mesg]),
     case crypto:hash(sha,[State#state.server_key,State#state.chal]) of
@@ -312,7 +320,7 @@ handle_auth_res(_Mesg={auth_res,[{id,ServerName},{chal,Chal},{cred,Cred}]},
 	    stop_timer(State#state.auth_timer),
 	    Timer = start_timer(State#state.ping_interval, ping),
 	    Cred1 = crypto:hash(sha,[State#state.client_key,Chal]),
-	    State1 = send(State,{auth_ack,[{id,State#state.id},{cred,Cred1}]}),
+	    State1 = send(State,{auth_ack,#{id=>State#state.id,cred=>Cred1}}),
 	    State2 = State1#state { auth_timer = undefined,
 				    ping_timer = Timer,
 				    ping_response = true,
@@ -421,7 +429,10 @@ connect(State) ->
 				   auth_timer = Timer,
 				   chal = Chal,
 				   wait_send = Ws },
-	    State2 = send(State1,{auth_req,[{id,State#state.id},{chal,Chal}]}),
+	    State2 = send(State1,{auth_req,
+				  #{ id=>State#state.id,
+				     chal=>Chal,
+				     timestamp=>tree_db_bin:timestamp()}}),
 	    {ok,State2};
 	{error,nxdomain} ->      connect_later(State);
 	{error,econnrefused} ->  connect_later(State);

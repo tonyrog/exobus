@@ -31,7 +31,8 @@
 	  ping_request = false :: boolean(),  %% seen ping request
 	  ping_count,      %% client_count at time for ping monitor
 	  args,
-	  sublist = []
+	  sublist = [],
+	  timediff = 0     %% timestamp diff between client and server
 	}).
 
 -define(HSIZE, 20).  %% hash is sha 
@@ -68,7 +69,7 @@ init(Socket, Args0) ->
 
 data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
     try binary_to_term(Bin) of
-	Mesg={auth_req, [{id,ClientID},{chal,Chal}]}
+	Mesg={auth_req,#{id:=ClientID,chal:=Chal,timestamp:=ClientTs}}
 	  when State#state.state =:= auth0 ->
 	    case lists:keyfind(ClientID, 1, State#state.clients) of
 		false ->
@@ -78,17 +79,20 @@ data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
 		    SKey  = key(proplists:get_value(server_key, Args)),
 		    CKey  = key(proplists:get_value(client_key, Args)),
 		    Chal1 = crypto:strong_rand_bytes(16),
+		    TimeDiff = tree_db_bin:timestamp() - ClientTs,
 		    State1 = State#state { client_id = ClientID,
 					   client_count = Count,
 					   state = auth1,
 					   client_key = CKey,
 					   server_key = SKey,
-					   chal = Chal1 },
+					   chal = Chal1,
+					   timediff = TimeDiff },
 		    case verify(State1,Hash,Count,Bin) of
 			{ok,State2} ->
 			    Cred  = crypto:hash(sha,[SKey,Chal]),
-			    Res = {auth_res,[{id,State2#state.server_id},
-					     {chal,Chal1},{cred,Cred}]},
+			    Res = {auth_res,#{id=>State2#state.server_id,
+					      chal=>Chal1,
+					      cred=>Cred}},
 			    State3 = send(State2,Res),
 			    {ok,State3};
 			Error ->
@@ -98,7 +102,7 @@ data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
 		    end
 	    end;
 
-	Mesg={auth_ack,[{id,ClientID},{cred,Cred}]}
+	Mesg={auth_ack,#{id:=ClientID,cred:=Cred}}
 	  when State#state.state =:= auth1,
 	       State#state.client_id =:= ClientID ->
 	    case verify(State,Hash,Count,Bin) of
@@ -161,7 +165,7 @@ control(_Socket, _Request, _From, State) ->
     lager:debug("exobus request ~p", [_Request]),
     {noreply, State}.
 
-info(_Socket, Info={xbus,_TopicPattern,_Topic,_Value}, State) 
+info(_Socket, Info={xbus,_TopicPattern,_Map}, State) 
   when State#state.state =:= open ->
     State1 = send(State, Info),
     {ok,State1};
@@ -187,6 +191,12 @@ handle_call(ID,Request,State) ->
 
 	{pub,Topic,Value} ->
 	    Reply = xbus:pub(Topic,Value),
+	    State1 = send(State,{reply,ID,Reply}),
+	    {ok,State1};
+
+	{pub,Topic,Value,TimeStamp} ->
+	    TimeStamp1 = TimeStamp + State#state.timediff,
+	    Reply = xbus:pub(Topic,Value,TimeStamp1),
 	    State1 = send(State,{reply,ID,Reply}),
 	    {ok,State1};
 	_ ->

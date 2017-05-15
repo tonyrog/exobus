@@ -1,3 +1,3 @@
 # exobus
 
-TCP/IP connection to realy ebus data
+exo_socket interface to xbus.
