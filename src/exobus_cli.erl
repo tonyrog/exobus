@@ -57,7 +57,8 @@
 	  ping_response = false :: boolean(),
 	  topic_list = [],
 	  wait_send = [],
-	  wait_recv = []
+	  wait_recv = [],
+	  timediff = 0     %% timestamp diff between client and server
 	}).
 
 %%%===================================================================
@@ -183,7 +184,7 @@ handle_cast(_Msg, State) ->
 
 handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
 	    State=#state {socket = S}) when 
-      (Tag =:= tcp orelse Tag =:= ssl orelse Tag =:= http), 
+      (Tag =:= tcp orelse Tag =:= ssl), 
       Socket =:= S#exo_socket.socket ->
     lager:debug("got data hash=~w, data=~p", [Hash,Bin]),
     exo_socket:setopts(S, [{active, once}]),
@@ -203,7 +204,7 @@ handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
 			{xbus,_TopicPattern,#{ topic:=Topic,
 					       value:=Value,
 					       timestamp:=TimeStamp }} ->
-			    xbus:pub(Topic,Value,TimeStamp),
+			    handle_xbus(Topic,Value,TimeStamp,State1),
 			    {noreply, State1};
 			{reply,ID,Reply} ->
 			    case lists:keytake(ID,2,State1#state.wait_recv) of
@@ -277,6 +278,7 @@ handle_info({timeout,TRef,auth}, State)
 	    {stop,Error,State}
     end;
 handle_info(_Info, State) ->
+    io:format("GOT INFO = ~p\n", [_Info]),
     lager:debug("got info ~p", [_Info]),
     {noreply, State}.
 
@@ -310,8 +312,22 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-handle_auth_res(_Mesg={auth_res,#{id:=ServerName,chal:=Chal,cred:=Cred}},
-		State) ->
+%% handle META messages by removing persistent and retain attributes
+handle_xbus(<<"{META}.",Topic/binary>>, Value, _TimeStamp, _State) ->
+    MetaOld = xbus:read_meta(Topic),
+    MetaNew = meta_remove([persistent, retain], Value),
+    Meta = meta_merge(MetaOld, MetaNew),
+    xbus:pub_meta(Topic, Meta);
+%% FIXME: handle timestamp diff
+handle_xbus(Topic, Value, TimeStamp, State) ->
+    TimeStamp1 = TimeStamp + State#state.timediff,
+    xbus:pub(Topic, Value, TimeStamp1).
+
+%% fixme: handle timestamp and client server time diff
+handle_auth_res(_Mesg={auth_res,#{id:=ServerName,
+				  %% timestamp := ServerTs,
+				  chal:=Chal,
+				  cred:=Cred}}, State) ->
     lager:debug("auth_res: ~p ok", [_Mesg]),
     case crypto:hash(sha,[State#state.server_key,State#state.chal]) of
 	Cred ->
@@ -326,7 +342,9 @@ handle_auth_res(_Mesg={auth_res,#{id:=ServerName,chal:=Chal,cred:=Cred}},
 				    ping_response = true,
 				    ping_count = State#state.server_count,
 				    server_name = ServerName,
-				    state = open },
+				    state = open
+				    %% timediff = xbus:timestamp() - ServerTs
+				  },
 	    State3 = transmit_wait(State2),
 	    {noreply, State3};
 	_CredFail ->
@@ -385,6 +403,20 @@ verify(State,Hash,Count,Bin) ->
 	    {error, bad_count}
     end.
 
+meta_remove([P|Ps], Meta) when is_list(Meta) ->
+    meta_remove(Ps, proplists:delete(P, Meta));
+meta_remove([], Meta) when is_list(Meta) ->
+    Meta;
+meta_remove(Ps, Meta) when is_map(Meta) ->
+    maps:with(maps:keys(Meta) -- Ps, Meta).
+
+meta_merge(OldMeta, [{P,V}|NewMeta]) ->
+    meta_merge([{P,V}|proplists:delete(P, OldMeta)],NewMeta);
+meta_merge(OldMeta, []) ->
+    OldMeta;
+meta_merge(OldMeta, NewMeta) when is_map(OldMeta), is_map(NewMeta) ->
+    maps:merge(OldMeta, NewMeta).
+
 irand64() ->
     <<R:64>> = crypto:strong_rand_bytes(8),
     R.
@@ -417,6 +449,7 @@ connect(State) ->
 	    Ws0   = State#state.wait_send,
 	    Ws = if State#state.topic_list =:= [] -> Ws0;
 		    true ->
+			 %% Maybe separate in sub and sub_meta?
 			 TL = lists:append([[T,<<"{META}.",T/binary>>] || 
 					       T <- State#state.topic_list]),
 			 CRef = make_ref(),
@@ -432,7 +465,7 @@ connect(State) ->
 	    State2 = send(State1,{auth_req,
 				  #{ id=>State#state.id,
 				     chal=>Chal,
-				     timestamp=>tree_db_bin:timestamp()}}),
+				     timestamp=>xbus:timestamp()}}),
 	    {ok,State2};
 	{error,nxdomain} ->      connect_later(State);
 	{error,econnrefused} ->  connect_later(State);

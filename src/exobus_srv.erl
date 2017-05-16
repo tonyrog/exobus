@@ -79,7 +79,7 @@ data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
 		    SKey  = key(proplists:get_value(server_key, Args)),
 		    CKey  = key(proplists:get_value(client_key, Args)),
 		    Chal1 = crypto:strong_rand_bytes(16),
-		    TimeDiff = tree_db_bin:timestamp() - ClientTs,
+		    TimeDiff = xbus:timestamp() - ClientTs,
 		    State1 = State#state { client_id = ClientID,
 					   client_count = Count,
 					   state = auth1,
@@ -92,7 +92,9 @@ data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
 			    Cred  = crypto:hash(sha,[SKey,Chal]),
 			    Res = {auth_res,#{id=>State2#state.server_id,
 					      chal=>Chal1,
-					      cred=>Cred}},
+					      cred=>Cred,
+					      timestamp=>xbus:timestamp()
+					     }},
 			    State3 = send(State2,Res),
 			    {ok,State3};
 			Error ->
