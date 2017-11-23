@@ -47,7 +47,7 @@ start_link(Args0) ->
     Port = proplists:get_value(server_port, Args, 17831),
     IfAddr =  proplists:get_value(ifaddr, Args, {0,0,0,0}),
     Idle_t = proplists:get_value(idle_timeout, Args, ?IDLE_TIMEOUT),
-    Send_t = proplists:get_value(send_timeout, Args, ?IDLE_TIMEOUT),
+    Send_t = proplists:get_value(send_timeout, Args, ?SEND_TIMEOUT),
     %% interface address ssl options etc
     exo_socket_server:start_link(Port, [tcp], 
 				 [{packet,4},{mode,binary},{active,once},
