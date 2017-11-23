@@ -17,6 +17,8 @@
 %% API
 -export([start_link/1]).
 -export([sub/2]).
+-export([sub_ack/2]).
+-export([ack/2]).
 -export([unsub/2]).
 -export([pub/3]).
 -export([pub/4]).
@@ -67,6 +69,12 @@
 
 sub(Pid,TopicPattern) ->
     gen_server:call(Pid, {sub,TopicPattern}).
+
+sub_ack(Pid,TopicPattern) ->
+    gen_server:call(Pid, {sub_ack,TopicPattern}).
+
+ack(Pid,TopicPattern) ->
+    gen_server:call(Pid, {ack,TopicPattern}).
 
 unsub(Pid,TopicPattern) ->
     gen_server:call(Pid, {unsub,TopicPattern}).
@@ -149,6 +157,10 @@ init(Opts) ->
 %%--------------------------------------------------------------------
 handle_call({sub,Topic}, From, State) ->
     remote_call({sub,[Topic]}, From, State);
+handle_call({sub_ack,Topic}, From, State) ->
+    remote_call({sub_ack,[Topic]}, From, State);
+handle_call({ack,Topic}, From, State) ->
+    remote_call({ack,[Topic]}, From, State);
 handle_call({unsub,Topic}, From, State) ->
     remote_call({unsub,[Topic]}, From, State);
 handle_call(Request={pub,_Topic,_Value}, From, State) ->

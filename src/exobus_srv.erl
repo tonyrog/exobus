@@ -179,10 +179,22 @@ handle_call(ID,Request,State) ->
     case Request of
 	{sub,TopicList} when is_list(TopicList) ->
 	    SubList = State#state.sublist,
-	    {Reply,SubList1} = do_subscribe(TopicList,SubList),
+	    {Reply,SubList1} = do_subscribe(TopicList,SubList,false),
 	    State1 = send(State, {reply,ID, Reply}),
 	    %% must add it again, instead of reference count
 	    {ok, State1#state { sublist = SubList1 }};
+
+	{sub_ack,TopicList} when is_list(TopicList) ->
+	    SubList = State#state.sublist,
+	    {Reply,SubList1} = do_subscribe(TopicList,SubList,true),
+	    State1 = send(State, {reply,ID, Reply}),
+	    %% must add it again, instead of reference count
+	    {ok, State1#state { sublist = SubList1 }};
+
+	{ack,Topic} ->
+	    Reply = xbus:ack(Topic),
+	    State1 = send(State,{reply,ID,Reply}),
+	    {ok,State1};
 
 	{unsub,TopicList} when is_list(TopicList) ->
 	    SubList = State#state.sublist,
@@ -207,22 +219,26 @@ handle_call(ID,Request,State) ->
 	    {stop,{error,einval},State}
     end.
 
-do_subscribe(Topics, SubList) ->
-    do_subscribe(Topics,SubList,ok).
+do_subscribe(Topics, SubList, Ack) ->
+    do_subscribe(Topics,SubList,Ack,ok).
 
-do_subscribe([Topic|Ts],SubList,Reply) ->
+do_subscribe([Topic|Ts],SubList,Ack,Reply) ->
     case lists:member(Topic,SubList) of
 	true ->
 	    do_subscribe(Ts,[Topic|SubList],Reply);
 	false ->
-	    case xbus:sub(Topic) of
+	    R = case Ack of
+		    true -> xbus:sub_ack(Topic);
+		    false -> xbus:sub(Topic)
+		end,
+	    case R of
 		true ->
-		    do_subscribe(Ts,[Topic|SubList],Reply);
+		    do_subscribe(Ts,[Topic|SubList],Ack,Reply);
 		Reply1 ->
-		    do_subscribe(Ts,[Topic|SubList],Reply1)
+		    do_subscribe(Ts,[Topic|SubList],Ack,Reply1)
 	    end
     end;
-do_subscribe([],SubList,Reply) ->
+do_subscribe([],SubList,_Ack,Reply) ->
     {Reply, SubList}.
 
 do_unsubscribe(Topics, SubList) ->
