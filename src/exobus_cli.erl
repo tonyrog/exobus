@@ -17,10 +17,13 @@
 %% API
 -export([start_link/1]).
 -export([sub/2]).
+-export([sub_meta/2]).
 -export([sub_ack/2]).
 -export([ack/2]).
 -export([unsub/2]).
+-export([unsub_meta/2]).
 -export([pub/3]).
+-export([pub_meta/3]).
 -export([pub/4]).
 
 %% gen_server callbacks
@@ -47,7 +50,8 @@
 	  client_key,
 	  server_count,
 	  client_count,
-	  chal,           %% challenge sent to server
+	  client_chal,           %% challenge sent to server
+	  server_chal,           %% challenge received by server
 	  socket :: exo_socket(),
 	  reconnect_interval,
 	  reconnect_timer,
@@ -55,11 +59,12 @@
 	  auth_timer,
 	  ping_interval,  %% send keep alive ping 
 	  ping_timer,
-	  ping_count,
+	  ping_count,     %% server count at last ping reply
 	  ping_response = false :: boolean(),
+	  activity = false :: boolean(),  %% data from server (since last ping)
 	  topic_list = [],
-	  wait_send = [],
-	  wait_recv = [],
+	  wait_send = [],  %% [{From,ID,Mon,{call,ID,Request}]
+	  wait_recv = [],  %% [{From,ID,Mon,{call,ID,Request}]
 	  timediff = 0     %% timestamp diff between client and server
 	}).
 
@@ -70,6 +75,9 @@
 sub(Pid,TopicPattern) ->
     gen_server:call(Pid, {sub,TopicPattern}).
 
+sub_meta(Pid,TopicPattern) ->
+    gen_server:call(Pid, {sub_meta,TopicPattern}).
+
 sub_ack(Pid,TopicPattern) ->
     gen_server:call(Pid, {sub_ack,TopicPattern}).
 
@@ -79,8 +87,14 @@ ack(Pid,TopicPattern) ->
 unsub(Pid,TopicPattern) ->
     gen_server:call(Pid, {unsub,TopicPattern}).
 
+unsub_meta(Pid,TopicPattern) ->
+    gen_server:call(Pid, {unsub_meta,TopicPattern}).
+
 pub(Pid,Topic,Value) ->
     gen_server:call(Pid, {pub,Topic,Value}).
+
+pub_meta(Pid,Topic,Value) ->
+    gen_server:call(Pid, {pub_meta,Topic,Value}).
 
 pub(Pid,Topic,Value,TimeStamp) ->
     gen_server:call(Pid, {pub,Topic,Value,TimeStamp}).
@@ -157,13 +171,19 @@ init(Opts) ->
 %%--------------------------------------------------------------------
 handle_call({sub,Topic}, From, State) ->
     remote_call({sub,[Topic]}, From, State);
+handle_call({sub_meta,Topic}, From, State) ->
+    remote_call({sub_meta,[Topic]}, From, State);
 handle_call({sub_ack,Topic}, From, State) ->
     remote_call({sub_ack,[Topic]}, From, State);
 handle_call({ack,Topic}, From, State) ->
     remote_call({ack,[Topic]}, From, State);
 handle_call({unsub,Topic}, From, State) ->
     remote_call({unsub,[Topic]}, From, State);
+handle_call({unsub_meta,Topic}, From, State) ->
+    remote_call({unsub_meta,[Topic]}, From, State);
 handle_call(Request={pub,_Topic,_Value}, From, State) ->
+    remote_call(Request, From, State);
+handle_call(Request={pub_meta,_Topic,_Value}, From, State) ->
     remote_call(Request, From, State);
 handle_call(Request={pub,_Topic,_Value,_TimeStamp}, From, State) ->
     remote_call(Request, From, State);
@@ -201,10 +221,12 @@ handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
     lager:debug("got data hash=~w, data=~p", [Hash,Bin]),
     exo_socket:setopts(S, [{active, once}]),
     try binary_to_term(Bin) of
-	Mesg={auth_res,_} when State#state.state =:= auth ->
-	    case verify(State#state{server_count=Count},Hash,Count,Bin) of
+	Mesg={auth_res,#{chal:=Chal}} when State#state.state =:= auth ->
+	    TimeStamp = xbus:timestamp(),
+	    case verify(State#state{server_count=Count,server_chal=Chal},
+			Hash,Count,Bin) of
 		{ok,State1} ->
-		    handle_auth_res(Mesg,State1);
+		    handle_auth_res(Mesg,TimeStamp,State1);
 		Error ->
 		    lager:error("message error ~p mesg ~p", [Error,Mesg]),
 		    {stop,Error,State}
@@ -217,14 +239,19 @@ handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
 					       value:=Value,
 					       timestamp:=TimeStamp }} ->
 			    handle_xbus(Topic,Value,TimeStamp,State1),
-			    {noreply, State1};
+			    {noreply, State1#state { activity = true }};
+			{xbus_meta,_TopicPattern,#{ topic:=Topic,
+						    value:=Value,
+						    timestamp:=TimeStamp }} ->
+			    handle_xbus_meta(Topic,Value,TimeStamp,State1),
+			    {noreply, State1#state { activity = true }};
 			{reply,ID,Reply} ->
 			    case lists:keytake(ID,2,State1#state.wait_recv) of
 				false ->
 				    {noreply,State1};
-				{value,{From,ID,{call,ID,_Request}},Wr} ->
-				    gen_server:reply(From, Reply),
-				    {noreply,State1#state { wait_recv = Wr}}
+				{value,Request,Wr} ->
+				    State2=remote_reply(Request,Reply,State1),
+				    {noreply,State2#state { wait_recv = Wr}}
 			    end;
 			ping_res ->
 			    {noreply,State1#state { ping_response = true }};
@@ -248,7 +275,6 @@ handle_info({Tag,Socket}, State) when
     State1 = close(State),
     {ok,State2} = connect_later(State1),
     {noreply, State2};
-
 handle_info({timeout,TRef,reconnect}, State)
   when State#state.reconnect_timer =:= TRef ->
     case connect(State#state { reconnect_timer = undefined }) of
@@ -257,7 +283,6 @@ handle_info({timeout,TRef,reconnect}, State)
 	{stop,Error} ->
 	    {stop,Error,State}
     end;
-
 handle_info({timeout,TRef,ping}, State)
   when State#state.ping_timer =:= TRef ->
     if State#state.state =:= open,
@@ -265,10 +290,21 @@ handle_info({timeout,TRef,ping}, State)
 	    Timer = start_timer(State#state.ping_interval, ping),
 	    State1 = State#state { ping_timer = Timer,
 				   ping_response = false,
+				   activity = false,
 				   ping_count = State#state.server_count },
 	    lager:debug("send ping", []),
 	    State2 = send(State1, ping),
 	    {noreply, State2};
+       State#state.state =:= open,
+       State#state.activity =:= true ->  
+	    %% we did get some data from server but ping reponse has not
+	    %% turned up yet, maybe a lot of data that is sent...
+	    Timer = start_timer(State#state.ping_interval, ping),
+	    State1 = State#state { ping_timer = Timer,
+				   ping_response = false,
+				   activity = false 
+				 },
+	    {noreply, State1};
        State#state.state =:= open ->
 	    %% no ping response / message from server, disconnect and reopen
 	    lager:debug("no ping response closing", []),
@@ -276,9 +312,11 @@ handle_info({timeout,TRef,ping}, State)
 	    {ok,State2} = connect_later(State1),
 	    {noreply, State2};
        true ->
-	    {noreply, State}
+	    State1 = State#state { ping_timer = undefined,
+				   ping_response = false,
+				   activity = false },
+	    {noreply, State1}
     end;
-
 handle_info({timeout,TRef,auth}, State)
   when State#state.auth_timer =:= TRef ->
     lager:warning("auth timeout", []),
@@ -289,8 +327,15 @@ handle_info({timeout,TRef,auth}, State)
 	{stop,Error} ->
 	    {stop,Error,State}
     end;
+handle_info({'DOWN',Mon,process,_Pid,_Reason}, State) ->
+    %% process waiting for remote response died so cleanup
+    %% wait_send and wait_recv
+    Ws = lists:keydelete(Mon,3,State#state.wait_send),
+    Wr = lists:keydelete(Mon,3,State#state.wait_recv),
+    {noreply, State#state { wait_send=Ws, wait_recv=Wr }};
+
 handle_info(_Info, State) ->
-    io:format("GOT INFO = ~p\n", [_Info]),
+    io:format("Unhabled info = ~p\n", [_Info]),
     lager:debug("got info ~p", [_Info]),
     {noreply, State}.
 
@@ -305,8 +350,14 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, State) ->
-    close(State),
+terminate(Reason, State) ->
+    State1 = close(State), 
+    %% close transfer wait_recv to wait_send! so only need to reply to
+    %% wait_send
+    lists:foreach(
+      fun({From,_ID,_Mon,_Call}) ->
+	      gen_server:reply(From, Reason)
+      end, State1#state.wait_send),
     ok.
 
 %%--------------------------------------------------------------------
@@ -324,24 +375,22 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-%% handle META messages by removing persistent and retain attributes
-handle_xbus(<<"{META}.",Topic/binary>>, Value, _TimeStamp, _State) ->
-    MetaOld = xbus:read_meta(Topic),
-    MetaNew = meta_remove([persistent, retain], Value),
-    Meta = meta_merge(MetaOld, MetaNew),
-    xbus:pub_meta(Topic, Meta);
-%% FIXME: handle timestamp diff
 handle_xbus(Topic, Value, TimeStamp, State) ->
     TimeStamp1 = TimeStamp + State#state.timediff,
     xbus:pub(Topic, Value, TimeStamp1).
 
-%% fixme: handle timestamp and client server time diff
-handle_auth_res(_Mesg={auth_res,#{id:=ServerName,
-				  %% timestamp := ServerTs,
-				  chal:=Chal,
-				  cred:=Cred}}, State) ->
+handle_xbus_meta(Topic, Value, _TimeStamp, _State) ->
+    MetaOld = xbus:read_meta(Topic),
+    MetaNew = meta_remove([persistent, retain], Value),
+    Meta = meta_merge(MetaOld, MetaNew),
+    xbus:pub_meta(Topic, Meta).
+
+handle_auth_res(_Mesg={auth_res,#{id := ServerName,
+				  timestamp := ServerTs,
+				  chal := Chal,
+				  cred := Cred}}, TimeStamp, State) ->
     lager:debug("auth_res: ~p ok", [_Mesg]),
-    case crypto:hash(sha,[State#state.server_key,State#state.chal]) of
+    case crypto:hash(sha,[State#state.server_key,State#state.client_chal]) of
 	Cred ->
 	    lager:info("client ~p credential accepted by server ~p", 
 		       [State#state.name, ServerName]),
@@ -349,13 +398,15 @@ handle_auth_res(_Mesg={auth_res,#{id:=ServerName,
 	    Timer = start_timer(State#state.ping_interval, ping),
 	    Cred1 = crypto:hash(sha,[State#state.client_key,Chal]),
 	    State1 = send(State,{auth_ack,#{id=>State#state.id,cred=>Cred1}}),
+	    TimeDiff = TimeStamp - ServerTs,
+	    io:format("time_diff = ~ws\n", [TimeDiff/1000000]),
 	    State2 = State1#state { auth_timer = undefined,
 				    ping_timer = Timer,
 				    ping_response = true,
 				    ping_count = State#state.server_count,
 				    server_name = ServerName,
-				    state = open
-				    %% timediff = xbus:timestamp() - ServerTs
+				    state = open,
+				    timediff = TimeDiff
 				  },
 	    State3 = transmit_wait(State2),
 	    {noreply, State3};
@@ -366,24 +417,33 @@ handle_auth_res(_Mesg={auth_res,#{id:=ServerName,
 	    {noreply, State2}
     end.
     
-remote_call(Request, From, State) ->
-    ID = make_ref(),
+remote_call(Request, From={Pid,ID}, State) ->
+    Mon = start_monitor(Pid),
     if State#state.state =:= open ->
 	    State1 = send(State,{call,ID,Request}),
-	    Wr = [{From,ID,{call,ID,Request}}|State1#state.wait_recv],
+	    Wr = [{From,ID,Mon,{call,ID,Request}}|State1#state.wait_recv],
 	    {noreply, State1#state { wait_recv = Wr }};
        true ->
-	    %% fixme monitor!
-	    Ws = State#state.wait_send++[{From,ID,{call,ID,Request}}],
+	    Ws = State#state.wait_send++[{From,ID,Mon,{call,ID,Request}}],
 	    {noreply, State#state { wait_send = Ws }}
     end.
 
-%% Emit calls/casts/info when socket is connected
-transmit_wait(State) ->
-    transmit_wait_(State,State#state.wait_send,
-		   State#state.wait_recv).
+remote_reply(Request={From,_ID,Mon,_Call}, Reply, State) ->
+    lager:debug("Reply = ~p, Request=~p\n", [Reply,Request]),
+    if Mon =:= undefined, element(1,From) =:= self() ->  %% call from self!
+	    State;
+       true ->
+	    gen_server:reply(From, Reply),
+	    stop_monitor(Mon),
+	    State
+    end.
 
-transmit_wait_(State, [W={_From,ID,{call,ID,Request}}|Ws], Wr) ->
+%% Emit calls/casts/info when socket is connected, and move
+%% wait_send to wait_recv
+transmit_wait(State) ->
+    transmit_wait_(State,State#state.wait_send, State#state.wait_recv).
+
+transmit_wait_(State, [W={_From,ID,_Mon,{call,ID,Request}}|Ws], Wr) ->
     State1 = send(State, {call,ID,Request}),
     transmit_wait_(State1, Ws, [W|Wr]);
 transmit_wait_(State, [], Wr) ->
@@ -392,6 +452,7 @@ transmit_wait_(State, [], Wr) ->
 send(State, Message) ->
     Bin    = term_to_binary(Message),
     Count  = State#state.client_count,
+    %% FIXME: include State#state.client_chal in Hash
     Hash   = crypto:hash(sha,[State#state.client_key,<<Count:64>>,Bin]),
     lager:debug("send: HASH ckey=~p ~p ~p = ~p",
 		[State#state.client_key,Count,Bin,Hash]),
@@ -401,9 +462,10 @@ send(State, Message) ->
 
 verify(State,Hash,Count,Bin) ->
     if State#state.server_count =:= Count ->
+	    %% FIXME: include State#state.server_chal in Hash
 	    Hash1 = crypto:hash(sha,[State#state.server_key,<<Count:64>>,Bin]),
 	    if Hash1 =:= Hash ->
-		    {ok,State#state { server_count = Count+1 }};
+		    {ok,State#state { server_count = next_count(Count) }};
 	       true ->
 		    lager:error("verify: HASH skey=~p ~p ~p = ~p (expect ~p)", 
 				[State#state.server_key,Count,Bin,Hash1,Hash]),
@@ -413,6 +475,11 @@ verify(State,Hash,Count,Bin) ->
 	    lager:error("verify: Count=~w, expected=~w",
 			[Count, State#state.server_count]),
 	    {error, bad_count}
+    end.
+
+next_count(Count) ->
+    if Count >= 16#ffffffffffffffff -> 0; %% wrap
+       true -> Count+1
     end.
 
 meta_remove([P|Ps], Meta) when is_list(Meta) ->
@@ -445,10 +512,17 @@ close(State) ->
     if State#state.socket =:= undefined -> ok;
        true -> exo_socket:close(State#state.socket)
     end,
-    State#state { state=closed, socket = undefined,
+    %% Resend commands that we have not received reply to
+    Ws = State#state.wait_recv ++ State#state.wait_send,
+    State#state { state=closed, 
+		  socket = undefined,
 		  auth_timer = undefined,
 		  reconnect_timer = undefined,
-		  ping_timer = undefined }.
+		  ping_timer = undefined,
+		  ping_response = false,
+		  activity = false,
+		  wait_send = Ws, wait_recv = []
+		}.
 
 connect(State) ->
     case exo_socket:connect(State#state.server_ip, State#state.server_port,
@@ -461,18 +535,25 @@ connect(State) ->
 	    Ws0   = State#state.wait_send,
 	    Ws = if State#state.topic_list =:= [] -> Ws0;
 		    true ->
-			 %% Maybe separate in sub and sub_meta?
-			 TL = lists:append([[T,<<"{META}.",T/binary>>] || 
-					       T <- State#state.topic_list]),
-			 CRef = make_ref(),
-			 From = {self(),CRef},
-			 Call = {call,CRef,{sub,TL}},
-			 Ws0++[{From,CRef,Call}]
+			 %% subscribe both to the topic and to the
+			 %% meta information about the topic
+			 %% FIXME: check if pattern overlap
+			 Mon = undefined, %% no point in monitor self
+
+			 ID1 = make_ref(),
+			 From1 = {self(),ID1},
+			 Call1 = {call,ID1,{sub_meta,State#state.topic_list}},
+
+			 ID2 = make_ref(),
+			 From2 = {self(),ID2},
+			 Call2 = {call,ID2,{sub,State#state.topic_list}},
+
+			 Ws0++[{From1,ID1,Mon,Call1},{From2,ID2,Mon,Call2}]
 		 end,
 	    State1 = State#state { socket=Socket, 
 				   state = auth,
 				   auth_timer = Timer,
-				   chal = Chal,
+				   client_chal = Chal,
 				   wait_send = Ws },
 	    State2 = send(State1,{auth_req,
 				  #{ id=>State#state.id,
@@ -496,6 +577,14 @@ connect_later(State) ->
        true ->
 	    {stop, {error,einval}}
     end.
+
+start_monitor(Pid) ->
+    erlang:monitor(process, Pid).
+
+stop_monitor(undefined) -> ok;
+stop_monitor(Mon) -> 
+    erlang:demonitor(Mon, [flush]).
+
 
 stop_timer(undefined) ->	    
     undefined;

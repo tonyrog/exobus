@@ -1,7 +1,7 @@
 %%% @author Tony Rogvall <tony@rogvall.se>
 %%% @copyright (C) 2017, Tony Rogvall
 %%% @doc
-%%%    exo http server access to erlbus
+%%%    exo_socket server for xbus
 %%% @end
 %%% Created : 20 Apr 2017 by Tony Rogvall <tony@rogvall.se>
 
@@ -25,7 +25,8 @@
 	  client_key,
 	  server_count = 0,
 	  client_count = 0,
-	  chal,
+	  client_chal,     %% challenge recived by client
+	  server_chal,     %% challenge sent to client
 	  socket,
 	  clients,
 	  ping_request = false :: boolean(),  %% seen ping request
@@ -71,6 +72,7 @@ data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
     try binary_to_term(Bin) of
 	Mesg={auth_req,#{id:=ClientID,chal:=Chal,timestamp:=ClientTs}}
 	  when State#state.state =:= auth0 ->
+	    TimeStamp = xbus:timestamp(), %% as early as possible
 	    case lists:keyfind(ClientID, 1, State#state.clients) of
 		false ->
 		    {stop, {unknow_client_id}, State};
@@ -79,13 +81,14 @@ data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
 		    SKey  = key(proplists:get_value(server_key, Args)),
 		    CKey  = key(proplists:get_value(client_key, Args)),
 		    Chal1 = crypto:strong_rand_bytes(16),
-		    TimeDiff = xbus:timestamp() - ClientTs,
+		    TimeDiff = TimeStamp - ClientTs,
 		    State1 = State#state { client_id = ClientID,
 					   client_count = Count,
 					   state = auth1,
 					   client_key = CKey,
 					   server_key = SKey,
-					   chal = Chal1,
+					   server_chal = Chal1,
+					   client_chal = Chal,
 					   timediff = TimeDiff },
 		    case verify(State1,Hash,Count,Bin) of
 			{ok,State2} ->
@@ -110,7 +113,7 @@ data(_Socket, <<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>, State) ->
 	    case verify(State,Hash,Count,Bin) of
 		{ok,State1} ->
 		    case crypto:hash(sha,[State1#state.client_key,
-					  State1#state.chal]) of
+					  State1#state.server_chal]) of
 			Cred ->
 			    {ok, State1#state { state = open }};
 			_ ->
@@ -171,6 +174,10 @@ info(_Socket, Info={xbus,_TopicPattern,_Map}, State)
   when State#state.state =:= open ->
     State1 = send(State, Info),
     {ok,State1};
+info(_Socket, Info={xbus_meta,_TopicPattern,_Map}, State) 
+  when State#state.state =:= open ->
+    State1 = send(State, Info),
+    {ok,State1};
 info(_Socket, Info, State) ->
     lager:debug("exobus info ~p", [Info]),
     {ok, State}.
@@ -180,6 +187,13 @@ handle_call(ID,Request,State) ->
 	{sub,TopicList} when is_list(TopicList) ->
 	    SubList = State#state.sublist,
 	    {Reply,SubList1} = do_subscribe(TopicList,SubList,false),
+	    State1 = send(State, {reply,ID, Reply}),
+	    %% must add it again, instead of reference count
+	    {ok, State1#state { sublist = SubList1 }};
+
+	{sub_meta,TopicList} when is_list(TopicList) ->
+	    SubList = State#state.sublist,
+	    {Reply,SubList1} = do_subscribe(TopicList,SubList,meta),
 	    State1 = send(State, {reply,ID, Reply}),
 	    %% must add it again, instead of reference count
 	    {ok, State1#state { sublist = SubList1 }};
@@ -198,7 +212,14 @@ handle_call(ID,Request,State) ->
 
 	{unsub,TopicList} when is_list(TopicList) ->
 	    SubList = State#state.sublist,
-	    {Reply,SubList1} = do_unsubscribe(TopicList,SubList),
+	    {Reply,SubList1} = do_unsubscribe(TopicList,SubList,true),
+	    State1 = send(State, {reply,ID, Reply}),
+	    %% must add it again, instead of reference count
+	    {ok, State1#state { sublist = SubList1 }};
+
+	{unsub_meta,TopicList} when is_list(TopicList) ->
+	    SubList = State#state.sublist,
+	    {Reply,SubList1} = do_unsubscribe(TopicList,SubList,meta),
 	    State1 = send(State, {reply,ID, Reply}),
 	    %% must add it again, instead of reference count
 	    {ok, State1#state { sublist = SubList1 }};
@@ -213,57 +234,69 @@ handle_call(ID,Request,State) ->
 	    Reply = xbus:pub(Topic,Value,TimeStamp1),
 	    State1 = send(State,{reply,ID,Reply}),
 	    {ok,State1};
+
+	{pub_meta,Topic,Value} ->
+	    Reply = xbus:pub_meta(Topic,Value),
+	    State1 = send(State,{reply,ID,Reply}),
+	    {ok,State1};
+
 	_ ->
 	    lager:error("bad call received ~p", [Request]),
 	    send(State,{reply,ID,{error,einval}}),
 	    {stop,{error,einval},State}
     end.
 
-do_subscribe(Topics, SubList, Ack) ->
-    do_subscribe(Topics,SubList,Ack,ok).
+do_subscribe(Topics, SubList, Variant) ->
+    do_subscribe(Topics,SubList,Variant,true).
 
-do_subscribe([Topic|Ts],SubList,Ack,Reply) ->
+do_subscribe([Topic|Ts],SubList,Variant,Reply) ->
     case lists:member(Topic,SubList) of
 	true ->
 	    do_subscribe(Ts,[Topic|SubList],Reply);
 	false ->
-	    R = case Ack of
+	    R = case Variant of
 		    true -> xbus:sub_ack(Topic);
-		    false -> xbus:sub(Topic)
+		    false -> xbus:sub(Topic);
+		    meta -> xbus:sub_meta(Topic)
 		end,
 	    case R of
 		true ->
-		    do_subscribe(Ts,[Topic|SubList],Ack,Reply);
+		    do_subscribe(Ts,[Topic|SubList],Variant,Reply);
 		Reply1 ->
-		    do_subscribe(Ts,[Topic|SubList],Ack,Reply1)
+		    do_subscribe(Ts,[Topic|SubList],Variant,Reply1)
 	    end
     end;
-do_subscribe([],SubList,_Ack,Reply) ->
+do_subscribe([],SubList,_Variant,Reply) ->
     {Reply, SubList}.
 
-do_unsubscribe(Topics, SubList) ->
-    do_unsubscribe(Topics, SubList, ok).
+do_unsubscribe(Topics, SubList, Variant) ->
+    do_unsubscribe(Topics, SubList, Variant, true).
 
-do_unsubscribe([Topic|Ts], SubList, Reply) ->
+do_unsubscribe([Topic|Ts], SubList, Variant, Reply) ->
     SubList1 = lists:delete(Topic, SubList),
     case lists:member(Topic, SubList1) of
 	true ->
-	    do_unsubscribe(Ts, SubList1, Reply);
+	    do_unsubscribe(Ts, SubList1, Variant, Reply);
 	false ->
-	    case xbus:unsub(Topic) of
+	    R = case Variant of
+		    true -> xbus:unsub(Topic);
+		    meta -> xbus:unsub_meta(Topic)
+		end,
+	    case R of
 		true ->
-		    do_unsubscribe(Ts, SubList1, Reply);
+		    do_unsubscribe(Ts, SubList1, Variant, Reply);
 		Reply1 ->
-		    do_unsubscribe(Ts, SubList1, Reply1)
+		    do_unsubscribe(Ts, SubList1, Variant, Reply1)
 	    end
     end;
-do_unsubscribe([], SubList, Reply) ->
+do_unsubscribe([], SubList, _Variant, Reply) ->
     {Reply, SubList}.
 
 
 send(State, Message) ->
     Bin    = term_to_binary(Message),
     Count  = State#state.server_count,
+    %% FIXME: include State#state.server_chal in Hash
     Hash   = crypto:hash(sha,[State#state.server_key,<<Count:64>>,Bin]),
     lager:debug("send: HASH skey=~p ~p ~p = ~p",
 		[State#state.server_key,Count,Bin,Hash]),
@@ -273,9 +306,10 @@ send(State, Message) ->
 
 verify(State,Hash,Count,Bin) ->
     if State#state.client_count =:= Count ->
+	    %% FIXME: include State#state.client_chal in Hash
 	    Hash1 = crypto:hash(sha,[State#state.client_key,<<Count:64>>,Bin]),
 	    if Hash1 =:= Hash ->
-		    {ok,State#state { client_count = Count+1 }};
+		    {ok,State#state { client_count = next_count(Count) }};
 		true ->
 		    lager:error("verify: HASH ckey=~p ~p ~p = ~p (expect ~p)", 
 				[State#state.client_key,Count,Bin,Hash1,Hash]),
@@ -285,6 +319,11 @@ verify(State,Hash,Count,Bin) ->
 	    lager:error("verify: Count=~w, expected=~w",
 			[Count, State#state.client_count]),
 	    {error, bad_count}
+    end.
+
+next_count(Count) ->
+    if Count >= 16#ffffffffffffffff -> 0; %% wrap
+       true -> Count+1
     end.
 
 irand64() ->
