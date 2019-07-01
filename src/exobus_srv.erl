@@ -172,6 +172,7 @@ control(_Socket, _Request, _From, State) ->
 
 info(_Socket, Info={xbus,_TopicPattern,_Map}, State) 
   when State#state.state =:= open ->
+    %% io:format("xbus message ~p\n", [Info]),
     State1 = send(State, Info),
     {ok,State1};
 info(_Socket, Info={xbus_meta,_TopicPattern,_Map}, State) 
@@ -212,7 +213,7 @@ handle_call(ID,Request,State) ->
 
 	{unsub,TopicList} when is_list(TopicList) ->
 	    SubList = State#state.sublist,
-	    {Reply,SubList1} = do_unsubscribe(TopicList,SubList,true),
+	    {Reply,SubList1} = do_unsubscribe(TopicList,SubList,data),
 	    State1 = send(State, {reply,ID, Reply}),
 	    %% must add it again, instead of reference count
 	    {ok, State1#state { sublist = SubList1 }};
@@ -246,40 +247,50 @@ handle_call(ID,Request,State) ->
 	    {stop,{error,einval},State}
     end.
 
-do_subscribe(Topics, SubList, Variant) ->
-    do_subscribe(Topics,SubList,Variant,true).
+do_subscribe(Topics, SubList, Variant0) ->
+    {Variant,Ack} = case Variant0 of
+			true  -> {data, true};
+			false -> {data, false};
+			meta  -> {meta, false}
+		    end,
+    do_subscribe_(Topics,SubList,Variant,Ack,true).
 
-do_subscribe([Topic|Ts],SubList,Variant,Reply) ->
-    case lists:member(Topic,SubList) of
-	true ->
-	    do_subscribe(Ts,[Topic|SubList],Reply);
+do_subscribe_([Topic|Ts],SubList,Variant,Ack,Reply) ->
+    case lists:member({Topic,Variant},SubList) of
+	true -> %% already in list, just add reference (fixme Ack?)
+	    do_subscribe_(Ts,[{Topic,Variant}|SubList],Variant,Ack,Reply);
 	false ->
 	    R = case Variant of
-		    true -> xbus:sub_ack(Topic);
-		    false -> xbus:sub(Topic);
-		    meta -> xbus:sub_meta(Topic)
+		    data when Ack -> %% fixme: first subscribe dictates ack!
+			xbus:sub_ack(Topic);
+		    data ->
+			xbus:sub(Topic);
+		    meta ->
+			xbus:sub_meta(Topic)
 		end,
 	    case R of
 		true ->
-		    do_subscribe(Ts,[Topic|SubList],Variant,Reply);
+		    do_subscribe_(Ts,[{Topic,Variant}|SubList],
+				 Variant,Ack,Reply);
 		Reply1 ->
-		    do_subscribe(Ts,[Topic|SubList],Variant,Reply1)
+		    do_subscribe_(Ts,[{Topic,Variant}|SubList],
+				 Variant,Ack,Reply1)
 	    end
     end;
-do_subscribe([],SubList,_Variant,Reply) ->
+do_subscribe_([],SubList,_Variant,_Ack,Reply) ->
     {Reply, SubList}.
 
 do_unsubscribe(Topics, SubList, Variant) ->
     do_unsubscribe(Topics, SubList, Variant, true).
 
 do_unsubscribe([Topic|Ts], SubList, Variant, Reply) ->
-    SubList1 = lists:delete(Topic, SubList),
-    case lists:member(Topic, SubList1) of
+    SubList1 = lists:delete({Topic,Variant}, SubList),
+    case lists:member({Topic,Variant}, SubList1) of %% the last instance?
 	true ->
 	    do_unsubscribe(Ts, SubList1, Variant, Reply);
-	false ->
+	false -> %% yes do real unsub
 	    R = case Variant of
-		    true -> xbus:unsub(Topic);
+		    data -> xbus:unsub(Topic);
 		    meta -> xbus:unsub_meta(Topic)
 		end,
 	    case R of

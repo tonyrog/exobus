@@ -238,14 +238,17 @@ handle_info({Tag,Socket,<<Hash:?HSIZE/binary,Count:?CSIZE,Bin/binary>>},
 			{xbus,_TopicPattern,#{ topic:=Topic,
 					       value:=Value,
 					       timestamp:=TimeStamp }} ->
+			    %% io:format("Mesg: ~p\n", [Mesg]),
 			    handle_xbus(Topic,Value,TimeStamp,State1),
 			    {noreply, State1#state { activity = true }};
 			{xbus_meta,_TopicPattern,#{ topic:=Topic,
 						    value:=Value,
 						    timestamp:=TimeStamp }} ->
+			    %% io:format("Meta: ~p\n", [Mesg]),
 			    handle_xbus_meta(Topic,Value,TimeStamp,State1),
 			    {noreply, State1#state { activity = true }};
 			{reply,ID,Reply} ->
+			    %% io:format("Reply: ~p\n", [Mesg]),
 			    case lists:keytake(ID,2,State1#state.wait_recv) of
 				false ->
 				    {noreply,State1};
@@ -335,7 +338,7 @@ handle_info({'DOWN',Mon,process,_Pid,_Reason}, State) ->
     {noreply, State#state { wait_send=Ws, wait_recv=Wr }};
 
 handle_info(_Info, State) ->
-    io:format("Unhabled info = ~p\n", [_Info]),
+    io:format("Unhandled info = ~p\n", [_Info]),
     lager:debug("got info ~p", [_Info]),
     {noreply, State}.
 
@@ -399,7 +402,7 @@ handle_auth_res(_Mesg={auth_res,#{id := ServerName,
 	    Cred1 = crypto:hash(sha,[State#state.client_key,Chal]),
 	    State1 = send(State,{auth_ack,#{id=>State#state.id,cred=>Cred1}}),
 	    TimeDiff = TimeStamp - ServerTs,
-	    io:format("time_diff = ~ws\n", [TimeDiff/1000000]),
+	    %% io:format("time_diff = ~ws\n", [TimeDiff/1000000]),
 	    State2 = State1#state { auth_timer = undefined,
 				    ping_timer = Timer,
 				    ping_response = true,
